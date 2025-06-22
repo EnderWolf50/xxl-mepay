@@ -1,0 +1,36 @@
+name: Build main.py with PyInstaller and uv
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true
+
+      - name: Install dependencies (from requirements.txt, if any)
+        run: uv sync
+
+      - name: Build with PyInstaller
+        run: pyinstaller --onefile --name xxl-mepay main.py
+
+      - name: Verify build output
+        run: dir dist\
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        if: github.ref_type == 'tag'
+        with:
+          files: dist/xxl-mepay.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
