@@ -1,271 +1,382 @@
+import asyncio
 import json
-import sys
-import time
-from urllib.parse import parse_qs, unquote, urlparse
+import re
+from dataclasses import dataclass
+from typing import TypedDict, cast
+from urllib.parse import parse_qs, urlparse
 
-import bs4
-import requests
-from playwright.sync_api import TimeoutError, expect, sync_playwright
+import httpx
+from bs4 import BeautifulSoup
+from colorama import Fore, Style
 
-# --- Configuration for Progress File ---
 PROGRESS_FILE = "progress.json"
+SUPPORT_CODE_PATTERN = re.compile(
+    r"https://www\.mepay\.com\.tw/XXL\?supportCode=([a-zA-Z0-9=]+)"
+)
+SUPPORTED_PATTERN = re.compile(r".+ 已應援過 (.+)，不可重複應援。")
 
 
-# --- Functions for Progress File Management ---
-def load_progress(filename: str = PROGRESS_FILE) -> dict:
+class LoginResponseData(TypedDict):
+    message: str
+    token: str
+
+
+class ApiResponse(TypedDict):
+    code: int
+    locale: str
+    message: str
+    success: bool
+
+
+class LoginResponse(ApiResponse):
+    data: LoginResponseData
+
+
+class GetSupportUserCodeSuccessUserData(TypedDict):
+    email: str
+    id: int
+    nickname: str
+    username: str
+
+
+class GetSupportUserCodeSuccessData(TypedDict):
+    support_user_code: str
+    user: GetSupportUserCodeSuccessUserData
+
+
+class GetSupportUserCodeFailedData(TypedDict):
+    message: str
+
+
+class GetSupportUserCodeResponse(ApiResponse):
+    data: GetSupportUserCodeSuccessData | GetSupportUserCodeFailedData
+
+
+async def login(email: str, password: str) -> str:
+    async with httpx.AsyncClient() as client:
+        res = await client.post(
+            "https://www.mepay.com.tw/api/auth/login",
+            json={"email": email, "password": password, "remember": 0},
+        )
+        if res.status_code != 200:
+            raise Exception("Login failed")
+
+        json: LoginResponse = res.json()
+        if not json.get("success", False):
+            raise Exception("Login failed")
+
+        token = res.json()["data"]["token"]
+        return token
+
+
+def extract_support_codes(text: str) -> set[str]:
+    return set(SUPPORT_CODE_PATTERN.findall(text))
+
+
+def extract_support_codes_in_page(soup: BeautifulSoup) -> set[str]:
+    extracted_codes: set[str] = set()
+
+    contents = soup.select(".c-post__body .c-article .c-article__content")
+    for content in contents:
+        content_text = content.get_text()
+        extracted_codes.update(extract_support_codes(content_text))
+
+    return extracted_codes
+
+
+def parse_page_number_from_url(url: str) -> int:
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    page_param = query_params.get("page")
+    if page_param is None:
+        raise ValueError("Page parameter not found in URL")
+    try:
+        return int(page_param[0])
+    except ValueError:
+        raise ValueError("Page parameter is not a valid integer")
+
+
+def get_max_page_number(soup: BeautifulSoup) -> int:
+    page_numbers = []
+    pagination = soup.select_one("p.BH-pagebtnA")
+    if pagination is None:
+        return 1
+
+    pages = pagination.select("a")
+    for page in pages:
+        page_class = page.get("class")
+        if isinstance(page_class, list) and "pagenow" in page_class:
+            page_numbers.append(int(page.get_text()))
+            continue
+
+        href = page.get("href")
+        if not isinstance(href, str) or "?page=" not in href:
+            continue
+        try:
+            page_number = parse_page_number_from_url(href)
+            page_numbers.append(page_number)
+        except ValueError:
+            continue
+
+    return max(page_numbers) if page_numbers else 1
+
+
+@dataclass(frozen=True)
+class CollectedResult:
+    max_page: int
+    support_codes: set[str]
+
+
+async def collect_first_floor_comment_support_codes(
+    client: httpx.AsyncClient,
+) -> set[str]:
+    res = await client.get(
+        "https://forum.gamer.com.tw/ajax/moreCommend.php",
+        params={"bsn": "80107", "snB": "161"},
+    )
+    if res.status_code != 200:
+        return set()
+
+    data: dict[str, dict[str, str | int] | int] = res.json()
+
+    comments = set()
+    for value in data.values():
+        if isinstance(value, int):
+            continue
+
+        comment = value.get("comment")
+        if comment is None or not isinstance(comment, str):
+            continue
+        comments.update(extract_support_codes(comment))
+
+    return comments
+
+
+async def collect_max_page_and_support_codes(
+    start_page: int = 1,
+) -> CollectedResult:
+    codes: set[str] = set()
+    base_url = "https://forum.gamer.com.tw/C.php"
+    base_params = {"bsn": "80107", "snA": "67"}
+
+    async with httpx.AsyncClient() as client:
+        first_page_res = await client.get(
+            base_url, params={**base_params, "page": start_page}
+        )
+        first_page_soup = BeautifulSoup(first_page_res.text, "html.parser")
+
+        first_page_codes = extract_support_codes_in_page(first_page_soup)
+        codes.update(first_page_codes)
+
+        first_floor_comment_codes = await collect_first_floor_comment_support_codes(
+            client
+        )
+        codes.update(first_floor_comment_codes)
+
+        max_page = get_max_page_number(first_page_soup)
+
+        tasks = [
+            client.get(base_url, params={**base_params, "page": page_num})
+            for page_num in range(max(2, start_page), max_page + 1)
+        ]
+        if not tasks:
+            return CollectedResult(max_page, codes)
+
+        page_responses: list[httpx.Response] = await asyncio.gather(*tasks)
+        for page_res in page_responses:
+            page_soup = BeautifulSoup(page_res.text, "html.parser")
+            page_codes = extract_support_codes_in_page(page_soup)
+            codes.update(page_codes)
+
+    return CollectedResult(max_page, codes)
+
+
+class SupportUserData(TypedDict):
+    username: str | None
+    support_user_code: str | None
+
+
+def get_support_user_data(
+    client: httpx.Client, support_code: str
+) -> SupportUserData | None:
+    res = client.get(f"https://www.mepay.com.tw/api/xxl/friendSupport/{support_code}")
+    if res.status_code == 405:
+        return None
+
+    json: GetSupportUserCodeResponse = res.json()
+
+    data = json.get("data")
+    if "message" in data:
+        data = cast(GetSupportUserCodeFailedData, data)
+        message = data["message"]
+
+        if message == "無法應援自己":
+            return {"username": "自己", "support_user_code": None}
+
+        match = SUPPORTED_PATTERN.match(message)
+        assert match is not None
+
+        return {"username": match.group(1), "support_user_code": None}
+
+    data = cast(GetSupportUserCodeSuccessData, data)
+    return {
+        "username": data["user"]["nickname"],
+        "support_user_code": data["support_user_code"],
+    }
+
+
+class SupportUserResult(TypedDict):
+    success: bool
+    message: str
+    support_code: str
+    username: str | None
+    support_user_code: str | None
+
+
+def support_user(mepay_token: str, support_code: str) -> SupportUserResult:
+    with httpx.Client(headers={"Authorization": f"Bearer {mepay_token}"}) as client:
+        support_user_data = get_support_user_data(client, support_code)
+        if support_user_data is None:
+            return {
+                "success": False,
+                "message": "未知的錯誤，可能是連結有誤",
+                "support_code": support_code,
+                "username": None,
+                "support_user_code": None,
+            }
+
+        username = support_user_data["username"]
+        support_user_code = support_user_data["support_user_code"]
+        if support_user_code is None:
+            return {
+                "success": False,
+                "message": f"已應援過 {username}",
+                "support_code": support_code,
+                **support_user_data,
+            }
+
+        support_res = client.post(
+            "https://www.mepay.com.tw/api/xxl/friendSupport",
+            json={"support_user_code": support_user_code},
+        )
+        if support_res.status_code != 200:
+            return {
+                "success": False,
+                "message": "未知的錯誤，可能是伺服器有問題",
+                "support_code": support_code,
+                **support_user_data,
+            }
+
+        return {
+            "success": True,
+            "message": f"成功應援 {username}",
+            "support_code": support_code,
+            **support_user_data,
+        }
+
+
+class ProgressData(TypedDict):
+    last_max_page: int | None
+    processed_codes: set[str]
+
+
+def load_progress(filename: str = PROGRESS_FILE) -> ProgressData:
     """Loads progress data from a JSON file."""
     try:
         with open(filename, "r", encoding="utf-8") as f:
             data = json.load(f)
-            # Ensure processed_urls is a set for efficient lookups
-            if "processed_urls" in data and isinstance(data["processed_urls"], list):
-                data["processed_urls"] = set(data["processed_urls"])
+            if "processed_codes" in data and isinstance(data["processed_codes"], list):
+                data["processed_codes"] = set(data["processed_codes"])
             else:
-                data["processed_urls"] = set()
+                data["processed_codes"] = set()
             return data
-    except FileNotFoundError:
-        print(f"Progress file '{filename}' not found. Starting with empty progress.")
-    except json.JSONDecodeError:
-        print(f"Error decoding JSON from '{filename}'. Starting with empty progress.")
-    return {"last_max_page": 1, "processed_urls": set()}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"last_max_page": None, "processed_codes": set()}
 
 
-def save_progress(data: dict, filename: str = PROGRESS_FILE):
-    """Saves progress data to a JSON file."""
-    # Convert set back to list for JSON serialization
-    if "processed_urls" in data and isinstance(data["processed_urls"], set):
-        copy = data.copy()
-        copy["processed_urls"] = sorted(list(copy["processed_urls"]))
-    try:
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(copy, f, indent=4, ensure_ascii=False)
-        # print(f"Progress saved to '{filename}'.") # Optional: remove for less verbosity
-    except IOError as e:
-        print(f"Error saving progress to '{filename}': {e}")
+def save_progress(data: ProgressData, filename: str = PROGRESS_FILE) -> None:
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "last_max_page": data["last_max_page"],
+                "processed_codes": list(data["processed_codes"]),
+            },
+            f,
+            indent=4,
+            ensure_ascii=False,
+        )
 
 
-# --- Prompt the user for username (email) and password ---
-EMAIL = input("Please enter your MePay email: ")
-PASSWORD = input("Please enter your MePay password: ")
+def tip(message: str) -> None:
+    print(f"{Style.BRIGHT}{Fore.WHITE}[TIP] {message}{Style.RESET_ALL}")
 
 
-# --- Optimized Page and Link Fetching ---
-def get_mepay_links_from_soup(soup_obj: bs4.BeautifulSoup) -> list[str]:
-    """
-    Extracts MePay XXL links from a BeautifulSoup object.
-    These are links like 'www.mepay.com.tw/XXL' embedded in a redir.
-    """
-    extracted_links = []
-    a_tags = soup_obj.find_all("a")
-    for a in a_tags:
-        if isinstance(a, bs4.element.Tag):
-            href = a.get("href")
-            if isinstance(href, str) and "www.mepay.com.tw%2FXXL" in href:
-                cleaned_link = unquote(
-                    href.replace("https://ref.gamer.com.tw/redir.php?url=", "")
-                )
-                extracted_links.append(cleaned_link)
-    return extracted_links
+def info(message: str) -> None:
+    print(f"{Fore.BLUE}[INFO] {message}{Style.RESET_ALL}")
 
 
-def get_max_page_number(soup_obj: bs4.BeautifulSoup) -> int:
-    """
-    Parses the pagination div to find the maximum page number.
-    Returns 1 if no pagination links are found.
-    """
-    page_numbers = []
-    pagination_div = soup_obj.find("p", class_="BH-pagebtnA")
-
-    if isinstance(pagination_div, bs4.element.Tag):
-        for a_tag in pagination_div.find_all("a"):
-            if isinstance(a_tag, bs4.element.Tag):
-                href = a_tag.get("href")
-                if isinstance(href, str) and "?page=" in href:
-                    parsed_href = urlparse(href)
-                    query_params = parse_qs(parsed_href.query)
-                    page_param = query_params.get("page")
-                    if page_param and page_param[0].isdigit():
-                        try:
-                            page_numbers.append(int(page_param[0]))
-                        except ValueError:
-                            continue
-    return max(page_numbers) if page_numbers else 1
+def error(message: str) -> None:
+    print(f"{Fore.RED}[ERROR] {message}{Style.RESET_ALL}")
 
 
-# --- Main Script Execution ---
+def skip(message: str) -> None:
+    print(f"{Fore.YELLOW}[SKIP] {message}{Style.RESET_ALL}")
 
-# 0. Load existing progress
-progress_data = load_progress()
-last_max_page_recorded = progress_data["last_max_page"]
-processed_urls = progress_data["processed_urls"]  # This is a set
 
-print(f"Previously recorded max page: {last_max_page_recorded}")
-print(f"Number of previously processed URLs: {len(processed_urls)}")
+def result(message: str) -> None:
+    print(f"{Fore.GREEN}[RESULT] {message}{Style.RESET_ALL}")
 
-links = []
-base_forum_url = (
-    "https://forum.gamer.com.tw/C.php?bsn=80107&snA=67&subbsn=0&threadSubbsn=8"
-)
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/103.0.0.0 Safari/537.36"
-}
 
-# 1. Fetch the first page to determine max_page and get its links
-print("Fetching initial page to determine total pages and links...")
-try:
-    res = requests.get(f"{base_forum_url}&page=1", headers=headers, timeout=15)
-    res.raise_for_status()
-    initial_soup = bs4.BeautifulSoup(res.text, "html.parser")
+async def main() -> None:
+    email = input("請輸入你的魔儲信箱: ")
+    if not email.strip():
+        raise ValueError("信箱不能為空")
+    password = input("請輸入你的魔儲密碼: ")
+    if not password.strip():
+        raise ValueError("密碼不能為空")
 
-    current_max_page = get_max_page_number(initial_soup)
-    # Always get links from page 1, as it's the anchor point and might change
-    links.extend(get_mepay_links_from_soup(initial_soup))
-    print(f"Determined a total of {current_max_page} pages.")
+    tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
+    progress = load_progress()
 
-except requests.exceptions.RequestException as e:
-    print(f"Error fetching initial page: {e}")
-    print(
-        "Cannot proceed with link scraping. Please check your internet connection or the URL."
+    last_max_page = progress["last_max_page"]
+    processed_codes = progress["processed_codes"]
+
+    info("抓取最新應援碼...")
+    collected_result = await collect_max_page_and_support_codes(
+        last_max_page if last_max_page is not None else 1
     )
-    sys.exit(1)
 
-# 2. Loop through remaining pages and collect links
-start_fetching_page = max(2, last_max_page_recorded)
+    info(f"先前最後抓取頁數: {last_max_page}")
+    info(f"先前已處理應援碼數: {len(processed_codes)}")
+    info(f"本次抓取頁數: {collected_result.max_page}")
+    info(f"本次抓取應援碼數: {len(collected_result.support_codes)}")
 
-if start_fetching_page > current_max_page:
-    print(
-        f"No new pages to fetch (max page {current_max_page} <= previously recorded {last_max_page_recorded})."
-    )
-else:
-    for page_num in range(start_fetching_page, current_max_page + 1):
-        page_url = f"{base_forum_url}&page={page_num}"
-        print(f"Fetching links from page {page_num}/{current_max_page}...")
-        try:
-            res = requests.get(page_url, headers=headers, timeout=15)
-            res.raise_for_status()
-            soup = bs4.BeautifulSoup(res.text, "html.parser")
-            links.extend(get_mepay_links_from_soup(soup))
-            time.sleep(1)  # Be polite: 1 second delay between requests
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching page {page_num}: {e}. Skipping this page.")
+    mepay_token = await login(email, password)
+    for support_code in collected_result.support_codes:
+        if support_code in processed_codes:
+            skip(f"已有應援紀錄，跳過: {support_code}")
             continue
 
+        support_result = support_user(mepay_token, support_code)
 
-# 3. Remove duplicates from the newly scraped links (within this run)
-original_link_count = len(links)
-links = list(dict.fromkeys(links))
+        processed_codes |= {support_code}
+        save_progress(
+            {"last_max_page": last_max_page, "processed_codes": processed_codes}
+        )
 
-if original_link_count != len(links):
-    print(
-        f"Removed {original_link_count - len(links)} duplicate links found in this scraping session."
+        result(support_result["message"])
+
+    save_progress(
+        {"last_max_page": collected_result.max_page, "processed_codes": processed_codes}
     )
-print(f"Found a total of {len(links)} unique MePay links across all pages.")
 
-with sync_playwright() as pw:
-    browser = pw.chromium.launch(headless=False)
-    context = browser.new_context()
 
-    # --- Speed Up: Block unnecessary resources ---
-    # Abort requests for images, fonts, and video/audio
-    context.route(
-        "**/*.{png,jpg,jpeg,gif,webp,svg,mp4,webm,ogg,mp3,wav,ttf,woff,woff2}",
-        lambda route: route.abort(),
-    )
-    # You could also block specific domains if they are known ad/tracker networks, e.g.:
-    # context.route("**/google-analytics.com/**", lambda route: route.abort())
-    # context.route("**/doubleclick.net/**", lambda route: route.abort())
-    # Be careful blocking CSS/JS, as it might break page functionality needed for interaction.
-
-    page = context.new_page()
-
-    page.goto("https://www.mepay.com.tw/XXL", timeout=30000)
-
+if __name__ == "__main__":
     try:
-        announcement = page.locator("text=通知公告")
-        if announcement.locator(".dialog-close").is_visible():
-            announcement.locator(".dialog-close").click()
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        error("已停止運行")
     except Exception as e:
-        print(f"Could not find or close notification dialog: {e}")
-
-    page.click(".login-btn")
-
-    page.wait_for_timeout(2000)
-    page.fill('input[name="email"]', EMAIL)
-    page.fill('input[name="password"]', PASSWORD)
-
-    page.click(".modal button:has-text('登入')")
-
-    try:
-        expect(page.locator("text=登出")).to_be_visible(timeout=15000)
-        print("Successfully logged in.")
-    except TimeoutError:
-        print("Login failed or took too long. Check your credentials.")
-        browser.close()
-        sys.exit(1)
-
-    # 8) now iterate your links
-    processed_count = 0
-    skipped_count = 0
-    error_count = 0
-
-    for i, url in enumerate(links):
-        if url in processed_urls:  # Check if URL was processed in a previous run
-            print(
-                f"[{i + 1}/{len(links)}] [SKIP] Already processed in a previous run: {url}"
-            )
-            skipped_count += 1
-            continue  # Skip to the next URL
-
-        print(f"\n[{i + 1}/{len(links)}] Processing link: {url}")
-        try:
-            # --- Speed Up: Removed page.wait_for_load_state("networkidle") here ---
-            # Rely on the 'expect' statements to signal page readiness.
-            page.goto(url, timeout=30000)
-
-            support_btn = page.get_by_role("button", name="我來應援你!")
-            back_btn = page.get_by_role("button", name="返回")
-
-            expect(support_btn.or_(back_btn)).to_be_visible(timeout=10_000)
-
-            if support_btn.is_visible():
-                print(f"[ACTION] Clicking '我來應援你!' on {url}")
-                support_btn.click()
-
-                success_msg_locator = page.locator(".share-support-success-modal")
-                # Increased timeout for success message as it might be an overlay
-                expect(success_msg_locator).to_be_visible(timeout=15_000)
-                print(f"[SUCCESS] Support confirmed for {url}")
-                progress_data["processed_urls"].add(
-                    url
-                )  # Add to the set of processed URLs
-                processed_count += 1
-
-            elif back_btn.is_visible():
-                print(f"[SKIP] Already supported (found '返回' button) on {url}")
-                progress_data["processed_urls"].add(
-                    url
-                )  # Also mark as processed if '返回' is found
-                skipped_count += 1
-            # --- Update JSON after skipping (due to '返回' button) ---
-            save_progress(progress_data)
-
-        except TimeoutError as e:
-            print(
-                f"[TIMEOUT] on {url}. Neither button appeared or an expected element took too long. Error: {e}"
-            )
-            error_count += 1
-            # You might or might not want to save progress on timeout/error.
-            # For now, it's not saved to retry next time.
-            continue
-
-    browser.close()
-    print("\n--- Script Summary ---")
-    print(f"Total unique links found: {len(links)}")
-    print(f"Links processed this run: {processed_count}")
-    print(f"Links skipped (already supported/processed): {skipped_count}")
-    print(f"Links with errors/timeouts: {error_count}")
-    print("Script finished. Browser closed.")
-
-# 9. Final Save of updated progress (redundant if saved per-iteration, but good as a fallback)
-progress_data["last_max_page"] = current_max_page
-save_progress(progress_data)
+        error(f"發生錯誤: {e}")
+    finally:
+        input("按 Enter 鍵以關閉程式...")
