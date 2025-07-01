@@ -1,11 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import copy_metadata
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    ['src\\xxl_mepay\\__main__.py'],
+    pathex=['src'],
     binaries=[],
-    datas=[],
+    datas=copy_metadata('readchar'),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -22,7 +23,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='main',
+    name='xxl-mepay',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

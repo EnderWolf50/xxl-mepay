@@ -25,7 +25,7 @@ jobs:
         run: uv sync
 
       - name: Build with PyInstaller
-        run: pyinstaller --onefile --name xxl-mepay main.py
+        run: pyinstaller xxl-mepay.spec
 
       - name: Verify build output
         run: dir dist\
