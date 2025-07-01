@@ -27,8 +27,6 @@ async def _run() -> None:
     if not password.strip():
         raise ValueError("密碼不能為空")
 
-    tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
-
     last_max_page = progress.get("last_max_page")
     processed_codes = progress.get("processed_codes", set())
     processed_reurls = progress.get("reurl_links", set())
@@ -38,6 +36,8 @@ async def _run() -> None:
         if remember:
             save_progress({**progress, "email": email})
             save_password(email, password)
+
+    tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
 
     info("正在登入魔儲...")
     mepay_token = await login(email, password)
