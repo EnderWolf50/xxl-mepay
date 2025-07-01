@@ -37,6 +37,10 @@ async def _run() -> None:
             save_progress({**progress, "email": email})
             save_password(email, password)
 
+    restart: bool = inquirer.confirm("是否蒐集所有應援碼？")
+    if restart:
+        last_max_page = None
+
     tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
 
     info("正在登入魔儲...")
