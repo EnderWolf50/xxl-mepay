@@ -1,5 +1,5 @@
 [project]
-name = "test"
+name = "xxl-mepay"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -8,6 +8,8 @@ dependencies = [
     "beautifulsoup4>=4.13.4",
     "colorama>=0.4.6",
     "httpx>=0.28.1",
+    "inquirer>=3.4.0",
+    "keyring>=25.6.0",
 ]
 
 [dependency-groups]

@@ -6,8 +6,14 @@ from typing import TypedDict, cast
 from urllib.parse import parse_qs, urlparse
 
 import httpx
+import inquirer
+import keyring
+import keyring.errors
 from bs4 import BeautifulSoup
 from colorama import Fore, Style
+
+SERVICE_NAME = "xxl_mepay"
+EMAIL_KEY = f"{SERVICE_NAME}_email"
 
 PROGRESS_FILE = "progress.json"
 SUPPORT_CODE_PATTERN = re.compile(
@@ -276,12 +282,12 @@ def support_user(mepay_token: str, support_code: str) -> SupportUserResult:
 
 
 class ProgressData(TypedDict):
+    email: str | None
     last_max_page: int | None
     processed_codes: set[str]
 
 
 def load_progress(filename: str = PROGRESS_FILE) -> ProgressData:
-    """Loads progress data from a JSON file."""
     try:
         with open(filename, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -291,13 +297,14 @@ def load_progress(filename: str = PROGRESS_FILE) -> ProgressData:
                 data["processed_codes"] = set()
             return data
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"last_max_page": None, "processed_codes": set()}
+        return {"email": None, "last_max_page": None, "processed_codes": set()}
 
 
 def save_progress(data: ProgressData, filename: str = PROGRESS_FILE) -> None:
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(
             {
+                "email": data["email"],
                 "last_max_page": data["last_max_page"],
                 "processed_codes": list(data["processed_codes"]),
             },
@@ -327,19 +334,49 @@ def result(message: str) -> None:
     print(f"{Fore.GREEN}[RESULT] {message}{Style.RESET_ALL}")
 
 
+def get_previous_password(email: str | None) -> str | None:
+    if email is None:
+        return None
+
+    try:
+        return keyring.get_password(SERVICE_NAME, email)
+    except keyring.errors.KeyringError:
+        return None
+
+
+def set_password(email: str, password: str) -> None:
+    try:
+        keyring.set_password(SERVICE_NAME, email, password)
+    except keyring.errors.KeyringError:
+        pass
+
+
 async def main() -> None:
-    email = input("請輸入你的魔儲信箱: ")
+    progress = load_progress()
+
+    previous_email = progress.get("email")
+    email: str = inquirer.text("請輸入你的魔儲信箱", default=previous_email)
+    previous_password = get_previous_password(email)
+    password: str = inquirer.password("請輸入你的魔儲密碼", default=previous_password)
+
     if not email.strip():
         raise ValueError("信箱不能為空")
-    password = input("請輸入你的魔儲密碼: ")
     if not password.strip():
         raise ValueError("密碼不能為空")
 
     tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
-    progress = load_progress()
 
-    last_max_page = progress["last_max_page"]
-    processed_codes = progress["processed_codes"]
+    last_max_page = progress.get("last_max_page")
+    processed_codes = progress.get("processed_codes", set())
+
+    if previous_email != email or previous_password != password:
+        remember: bool = inquirer.confirm("要記住這個信箱和密碼嗎？")
+        if remember:
+            save_progress({**progress, "email": email})
+            set_password(email, password)
+
+    info("正在登入魔儲...")
+    mepay_token = await login(email, password)
 
     info("抓取最新應援碼...")
     collected_result = await collect_max_page_and_support_codes(
@@ -351,7 +388,6 @@ async def main() -> None:
     info(f"本次抓取頁數: {collected_result.max_page}")
     info(f"本次抓取應援碼數: {len(collected_result.support_codes)}")
 
-    mepay_token = await login(email, password)
     for support_code in collected_result.support_codes:
         if support_code in processed_codes:
             skip(f"已有應援紀錄，跳過: {support_code}")
@@ -361,13 +397,21 @@ async def main() -> None:
 
         processed_codes |= {support_code}
         save_progress(
-            {"last_max_page": last_max_page, "processed_codes": processed_codes}
+            {
+                "email": email,
+                "last_max_page": last_max_page,
+                "processed_codes": processed_codes,
+            }
         )
 
         result(support_result["message"])
 
     save_progress(
-        {"last_max_page": collected_result.max_page, "processed_codes": processed_codes}
+        {
+            "email": email,
+            "last_max_page": collected_result.max_page,
+            "processed_codes": processed_codes,
+        }
     )
 
 
