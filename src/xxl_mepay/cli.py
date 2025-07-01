@@ -4,7 +4,8 @@ import inquirer
 
 from xxl_mepay.auth import login
 from xxl_mepay.bahamut import collect_forum_data
-from xxl_mepay.mepay import support_user
+from xxl_mepay.mepay import roll_dice, support_user
+from xxl_mepay.models import ProgressData
 from xxl_mepay.state import (
     get_previous_password,
     load_progress,
@@ -14,34 +15,14 @@ from xxl_mepay.state import (
 from xxl_mepay.utils import error, info, success, tip, warning
 
 
-async def _run() -> None:
-    progress = load_progress()
-
-    previous_email = progress.get("email")
-    email: str = inquirer.text("請輸入你的魔儲信箱", default=previous_email)
-    previous_password = get_previous_password(email)
-    password: str = inquirer.password("請輸入你的魔儲密碼", default=previous_password)
-
-    if not email.strip():
-        raise ValueError("信箱不能為空")
-    if not password.strip():
-        raise ValueError("密碼不能為空")
-
+async def support(progress: ProgressData, email: str, password: str):
     last_max_page = progress.get("last_max_page")
     processed_codes = progress.get("processed_codes", set())
     processed_reurls = progress.get("reurl_links", set())
 
-    if previous_email != email or previous_password != password:
-        remember: bool = inquirer.confirm("要記住這個信箱和密碼嗎？")
-        if remember:
-            save_progress({**progress, "email": email})
-            save_password(email, password)
-
     restart: bool = inquirer.confirm("是否蒐集所有應援碼？")
     if restart:
         last_max_page = None
-
-    tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
 
     info("正在登入魔儲...")
     mepay_token = await login(email, password)
@@ -89,6 +70,42 @@ async def _run() -> None:
             "reurl_links": processed_reurls | collected_result.reurl_links,
         }
     )
+
+
+async def dice(email: str, password: str):
+    info("正在登入魔儲...")
+    mepay_token = await login(email, password)
+
+    roll_dice(mepay_token)
+
+
+async def _run() -> None:
+    tip("可以使用 Ctrl + C 停止運行（沒用的話可以多點幾次）")
+
+    progress = load_progress()
+
+    previous_email = progress.get("email")
+    email: str = inquirer.text("請輸入你的魔儲信箱", default=previous_email)
+    previous_password = get_previous_password(email)
+    password: str = inquirer.password("請輸入你的魔儲密碼", default=previous_password)
+
+    if not email.strip():
+        raise ValueError("信箱不能為空")
+    if not password.strip():
+        raise ValueError("密碼不能為空")
+
+    if previous_email != email or previous_password != password:
+        remember: bool = inquirer.confirm("要記住這個信箱和密碼嗎？")
+        if remember:
+            save_progress({**progress, "email": email})
+            save_password(email, password)
+
+    action: str = inquirer.list_input("你這次要做什麼？", choices=["應援", "骰骰子"])
+
+    if action == "應援":
+        await support(progress, email, password)
+    elif action == "骰骰子":
+        await dice(email, password)
 
 
 def main():
