@@ -3,7 +3,7 @@ import asyncio
 import inquirer
 
 from xxl_mepay.auth import login
-from xxl_mepay.bahamut import collect_max_page_and_support_codes
+from xxl_mepay.bahamut import collect_forum_data
 from xxl_mepay.mepay import support_user
 from xxl_mepay.state import (
     get_previous_password,
@@ -11,7 +11,7 @@ from xxl_mepay.state import (
     save_password,
     save_progress,
 )
-from xxl_mepay.utils import error, info, result, skip, tip
+from xxl_mepay.utils import error, info, success, tip, warning
 
 
 async def _run() -> None:
@@ -31,6 +31,7 @@ async def _run() -> None:
 
     last_max_page = progress.get("last_max_page")
     processed_codes = progress.get("processed_codes", set())
+    processed_reurls = progress.get("reurl_links", set())
 
     if previous_email != email or previous_password != password:
         remember: bool = inquirer.confirm("要記住這個信箱和密碼嗎？")
@@ -42,7 +43,7 @@ async def _run() -> None:
     mepay_token = await login(email, password)
 
     info("抓取最新應援碼...")
-    collected_result = await collect_max_page_and_support_codes(
+    collected_result = await collect_forum_data(
         last_max_page if last_max_page is not None else 1
     )
 
@@ -53,7 +54,7 @@ async def _run() -> None:
 
     for support_code in collected_result.support_codes:
         if support_code in processed_codes:
-            skip(f"已有應援紀錄，跳過: {support_code}")
+            warning(f"已有應援紀錄，跳過: {support_code}")
             continue
 
         support_result = support_user(mepay_token, support_code)
@@ -64,16 +65,24 @@ async def _run() -> None:
                 "email": email,
                 "last_max_page": last_max_page,
                 "processed_codes": processed_codes,
+                "reurl_links": processed_reurls,
             }
         )
 
-        result(support_result["message"])
+        success(support_result["message"])
+
+    new_reurls = collected_result.reurl_links - processed_reurls
+    if new_reurls:
+        tip("以下是本次蒐集到的短網址，請自行斟酌取用: ")
+        for reurl_link in new_reurls:
+            warning(reurl_link, "REURL")
 
     save_progress(
         {
             "email": email,
             "last_max_page": collected_result.max_page,
             "processed_codes": processed_codes,
+            "reurl_links": processed_reurls | collected_result.reurl_links,
         }
     )
 

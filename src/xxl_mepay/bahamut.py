@@ -5,26 +5,12 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 from bs4 import BeautifulSoup
 
-from xxl_mepay.models import CollectedResult
+from xxl_mepay.models import CollectedResult, ExtractedResult
 
 _SUPPORT_CODE_PATTERN = re.compile(
     r"https://www\.mepay\.com\.tw/XXL\?supportCode=([a-zA-Z0-9=]+)"
 )
-
-
-def extract_support_codes(text: str) -> set[str]:
-    return set(_SUPPORT_CODE_PATTERN.findall(text))
-
-
-def extract_support_codes_in_page(soup: BeautifulSoup) -> set[str]:
-    extracted_codes: set[str] = set()
-
-    contents = soup.select(".c-post__body .c-article .c-article__content")
-    for content in contents:
-        content_text = content.get_text()
-        extracted_codes.update(extract_support_codes(content_text))
-
-    return extracted_codes
+_REURL_PATTERN = re.compile(r"https://reurl.cc/[0-9a-zA-Z]+")
 
 
 def parse_page_number_from_url(url: str) -> int:
@@ -64,19 +50,28 @@ def get_max_page_number(soup: BeautifulSoup) -> int:
     return max(page_numbers) if page_numbers else 1
 
 
-async def collect_first_floor_comment_support_codes(
+def extract_support_codes(text: str) -> set[str]:
+    return set(_SUPPORT_CODE_PATTERN.findall(text))
+
+
+def extract_reurls(text: str) -> set[str]:
+    return set(_REURL_PATTERN.findall(text))
+
+
+async def parse_first_floor_comments(
     client: httpx.AsyncClient,
-) -> set[str]:
+) -> ExtractedResult:
     res = await client.get(
         "https://forum.gamer.com.tw/ajax/moreCommend.php",
         params={"bsn": "80107", "snB": "161"},
     )
     if res.status_code != 200:
-        return set()
+        return ExtractedResult()
 
     data: dict[str, dict[str, str | int] | int] = res.json()
 
-    comments = set()
+    codes = set()
+    reurls = set()
     for value in data.values():
         if isinstance(value, int):
             continue
@@ -84,17 +79,33 @@ async def collect_first_floor_comment_support_codes(
         comment = value.get("comment")
         if comment is None or not isinstance(comment, str):
             continue
-        comments.update(extract_support_codes(comment))
+        codes.update(extract_support_codes(comment))
+        reurls.update(extract_reurls(comment))
 
-    return comments
+    return ExtractedResult(support_codes=codes, reurl_links=reurls)
 
 
-async def collect_max_page_and_support_codes(
+def parse_page(soup: BeautifulSoup) -> ExtractedResult:
+    extracted_codes: set[str] = set()
+    extracted_reurls: set[str] = set()
+
+    contents = soup.select(".c-post__body .c-article .c-article__content")
+    for content in contents:
+        content_text = content.get_text()
+        extracted_codes.update(extract_support_codes(content_text))
+        extracted_reurls.update(extract_reurls(content_text))
+
+    return ExtractedResult(support_codes=extracted_codes, reurl_links=extracted_reurls)
+
+
+async def collect_forum_data(
     start_page: int = 1,
 ) -> CollectedResult:
-    codes: set[str] = set()
     base_url = "https://forum.gamer.com.tw/C.php"
     base_params = {"bsn": "80107", "snA": "67"}
+
+    codes: set[str] = set()
+    reurls: set[str] = set()
 
     async with httpx.AsyncClient() as client:
         first_page_res = await client.get(
@@ -102,13 +113,13 @@ async def collect_max_page_and_support_codes(
         )
         first_page_soup = BeautifulSoup(first_page_res.text, "html.parser")
 
-        first_page_codes = extract_support_codes_in_page(first_page_soup)
-        codes.update(first_page_codes)
+        first_page_result = parse_page(first_page_soup)
+        codes.update(first_page_result.support_codes)
+        reurls.update(first_page_result.reurl_links)
 
-        first_floor_comment_codes = await collect_first_floor_comment_support_codes(
-            client
-        )
-        codes.update(first_floor_comment_codes)
+        first_floor_comment_result = await parse_first_floor_comments(client)
+        codes.update(first_floor_comment_result.support_codes)
+        reurls.update(first_floor_comment_result.reurl_links)
 
         max_page = get_max_page_number(first_page_soup)
 
@@ -117,12 +128,13 @@ async def collect_max_page_and_support_codes(
             for page_num in range(max(2, start_page), max_page + 1)
         ]
         if not tasks:
-            return CollectedResult(max_page, codes)
+            return CollectedResult(max_page, codes, reurls)
 
         page_responses: list[httpx.Response] = await asyncio.gather(*tasks)
         for page_res in page_responses:
             page_soup = BeautifulSoup(page_res.text, "html.parser")
-            page_codes = extract_support_codes_in_page(page_soup)
-            codes.update(page_codes)
+            page_result = parse_page(page_soup)
+            codes.update(page_result.support_codes)
+            reurls.update(page_result.reurl_links)
 
-    return CollectedResult(max_page, codes)
+    return CollectedResult(max_page, codes, reurls)

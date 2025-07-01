@@ -1,21 +1,29 @@
 from colorama import Fore, Style
 
 
-def tip(message: str) -> None:
-    print(f"{Style.BRIGHT}{Fore.WHITE}[TIP] {message}{Style.RESET_ALL}")
+def tip(message: str, prefix: str = "TIP") -> None:
+    print(f"{Style.BRIGHT}{Fore.WHITE}[{prefix}] {message}{Style.RESET_ALL}")
 
 
-def info(message: str) -> None:
-    print(f"{Fore.BLUE}[INFO] {message}{Style.RESET_ALL}")
+def info(message: str, prefix: str = "INFO") -> None:
+    print(f"{Fore.BLUE}[{prefix}] {message}{Style.RESET_ALL}")
 
 
-def error(message: str) -> None:
-    print(f"{Fore.RED}[ERROR] {message}{Style.RESET_ALL}")
+def error(message: str, prefix: str = "ERROR") -> None:
+    print(f"{Fore.RED}[{prefix}] {message}{Style.RESET_ALL}")
+
+
+def warning(message: str, prefix: str = "WARNING") -> None:
+    print(f"{Fore.YELLOW}[{prefix}] {message}{Style.RESET_ALL}")
 
 
 def skip(message: str) -> None:
-    print(f"{Fore.YELLOW}[SKIP] {message}{Style.RESET_ALL}")
+    warning(message, "SKIP")
+
+
+def success(message: str, prefix: str = "SUCCESS") -> None:
+    print(f"{Fore.GREEN}[{prefix}] {message}{Style.RESET_ALL}")
 
 
 def result(message: str) -> None:
-    print(f"{Fore.GREEN}[RESULT] {message}{Style.RESET_ALL}")
+    success(message, "RESULT")

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypedDict
 
 
@@ -55,9 +55,17 @@ class ProgressData(TypedDict):
     email: str | None
     last_max_page: int | None
     processed_codes: set[str]
+    reurl_links: set[str]
+
+
+@dataclass
+class ExtractedResult:
+    support_codes: set[str] = field(default_factory=set)
+    reurl_links: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
 class CollectedResult:
     max_page: int
     support_codes: set[str]
+    reurl_links: set[str]
