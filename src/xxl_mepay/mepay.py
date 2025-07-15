@@ -10,7 +10,7 @@ from xxl_mepay.models import (
     SupportUserData,
     SupportUserResult,
 )
-from xxl_mepay.utils import result, skip, success, warning
+from xxl_mepay.utils import success, warning
 
 _SUPPORTED_PATTERN = re.compile(r".+ 已應援過 (.+)，不可重複應援。")
 
@@ -33,7 +33,8 @@ def get_support_user_data(
             return {"username": "自己", "support_user_code": None}
 
         match = _SUPPORTED_PATTERN.match(message)
-        assert match is not None
+        if match is None:
+            return None
 
         return {"username": match.group(1), "support_user_code": None}
 
@@ -50,7 +51,7 @@ def support_user(mepay_token: str, support_code: str) -> SupportUserResult:
         if support_user_data is None:
             return {
                 "success": False,
-                "message": "未知的錯誤，可能是連結有誤",
+                "message": "未知的錯誤，可能是連結有誤，或者帳號已刪除。",
                 "support_code": support_code,
                 "username": None,
                 "support_user_code": None,

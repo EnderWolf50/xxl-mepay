@@ -1,4 +1,5 @@
 import asyncio
+import traceback
 
 import inquirer
 
@@ -37,39 +38,42 @@ async def support(progress: ProgressData, email: str, password: str):
     info(f"本次抓取頁數: {collected_result.max_page}")
     info(f"本次抓取應援碼數: {len(collected_result.support_codes)}")
 
-    for support_code in collected_result.support_codes:
-        if support_code in processed_codes:
-            warning(f"已有應援紀錄，跳過: {support_code}")
-            continue
+    try:
+        for support_code in collected_result.support_codes:
+            if support_code in processed_codes:
+                warning(f"已有應援紀錄，跳過: {support_code}")
+                continue
 
-        support_result = support_user(mepay_token, support_code)
+            support_result = support_user(mepay_token, support_code)
 
-        processed_codes |= {support_code}
+            processed_codes |= {support_code}
+            save_progress(
+                {
+                    "email": email,
+                    "last_max_page": last_max_page,
+                    "processed_codes": processed_codes,
+                    "reurl_links": processed_reurls,
+                }
+            )
+
+            success(support_result["message"])
+
+        new_reurls = collected_result.reurl_links - processed_reurls
+        if new_reurls:
+            tip("以下是本次蒐集到的短網址，請自行斟酌取用: ")
+            for reurl_link in new_reurls:
+                warning(reurl_link, "REURL")
+
         save_progress(
             {
                 "email": email,
-                "last_max_page": last_max_page,
+                "last_max_page": collected_result.max_page,
                 "processed_codes": processed_codes,
-                "reurl_links": processed_reurls,
+                "reurl_links": processed_reurls | collected_result.reurl_links,
             }
         )
-
-        success(support_result["message"])
-
-    new_reurls = collected_result.reurl_links - processed_reurls
-    if new_reurls:
-        tip("以下是本次蒐集到的短網址，請自行斟酌取用: ")
-        for reurl_link in new_reurls:
-            warning(reurl_link, "REURL")
-
-    save_progress(
-        {
-            "email": email,
-            "last_max_page": collected_result.max_page,
-            "processed_codes": processed_codes,
-            "reurl_links": processed_reurls | collected_result.reurl_links,
-        }
-    )
+    except Exception as e:
+        traceback.print_exc()
 
 
 async def dice(email: str, password: str):
