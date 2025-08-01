@@ -4,7 +4,7 @@ from xxl_mepay.models import LoginResponse
 
 
 async def login(email: str, password: str) -> str:
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         res = await client.post(
             "https://www.mepay.com.tw/api/auth/login",
             json={"email": email, "password": password, "remember": 0},

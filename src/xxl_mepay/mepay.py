@@ -46,7 +46,9 @@ def get_support_user_data(
 
 
 def support_user(mepay_token: str, support_code: str) -> SupportUserResult:
-    with httpx.Client(headers={"Authorization": f"Bearer {mepay_token}"}) as client:
+    with httpx.Client(
+        headers={"Authorization": f"Bearer {mepay_token}"}, timeout=30
+    ) as client:
         support_user_data = get_support_user_data(client, support_code)
         if support_user_data is None:
             return {
@@ -104,7 +106,9 @@ def get_remain_chance(client: httpx.Client) -> int:
 
 
 def roll_dice(mepay_token: str):
-    with httpx.Client(headers={"Authorization": f"Bearer {mepay_token}"}) as client:
+    with httpx.Client(
+        headers={"Authorization": f"Bearer {mepay_token}"}, timeout=30
+    ) as client:
         positions = get_award_positions(client)
         remain_chance = get_remain_chance(client)
 
