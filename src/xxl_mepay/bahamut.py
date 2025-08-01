@@ -63,7 +63,7 @@ async def parse_first_floor_comments(
 ) -> ExtractedResult:
     res = await client.get(
         "https://forum.gamer.com.tw/ajax/moreCommend.php",
-        params={"bsn": "80107", "snB": "161"},
+        params={"bsn": "80107", "snB": "1396"},
     )
     if res.status_code != 200:
         return ExtractedResult()
@@ -102,7 +102,7 @@ async def collect_forum_data(
     start_page: int = 1,
 ) -> CollectedResult:
     base_url = "https://forum.gamer.com.tw/C.php"
-    base_params = {"bsn": "80107", "snA": "67"}
+    base_params = {"bsn": "80107", "snA": "407"}
 
     codes: set[str] = set()
     reurls: set[str] = set()
